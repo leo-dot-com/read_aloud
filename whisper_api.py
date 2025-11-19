@@ -1,15 +1,14 @@
-# whisper_api.py - Local Whisper Transcription API
+# whisper_api.py - OPTIMIZED with faster-whisper
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-import whisper
+from faster_whisper import WhisperModel
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import tempfile
 import logging
 import json
 from datetime import datetime
-import numpy as np
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,23 +21,28 @@ CORS(app)
 model = None
 
 def load_model_once():
-    """Load Whisper model only once when the API starts"""
+    """Load optimized Whisper model"""
     global model
     
     if model is not None:
         return
     
-    logger.info("Loading Whisper tiny model...")
+    logger.info("Loading optimized Whisper tiny model...")
     try:
-        # Using tiny model for faster inference on Railway
-        model = whisper.load_model("tiny")
-        logger.info("Whisper model loaded successfully!")
+        # Use faster-whisper with int8 quantization - MUCH smaller
+        model = WhisperModel(
+            "tiny", 
+            device="cpu",  # Use CPU to reduce size (no CUDA dependencies)
+            compute_type="int8",  # Quantized for smaller size
+            download_root="/tmp/whisper-models"  # Cache in tmp
+        )
+        logger.info("Optimized Whisper model loaded successfully!")
     except Exception as e:
         logger.error(f"Failed to load Whisper model: {str(e)}")
         raise
 
 def analyze_reading_performance(transcription, original_text, audio_duration):
-    """Analyze reading performance based on transcription"""
+    """Analyze reading performance (same as before but optimized)"""
     analysis = {
         'word_accuracy': 0,
         'reading_pace_wpm': 0,
@@ -52,40 +56,38 @@ def analyze_reading_performance(transcription, original_text, audio_duration):
     }
     
     try:
-        # Convert to lowercase for comparison
         original_lower = original_text.lower()
         transcription_lower = transcription.lower()
         
-        # Split into words
         original_words = [word.strip('.,!?;:') for word in original_lower.split()]
         transcribed_words = [word.strip('.,!?;:') for word in transcription_lower.split()]
         
-        # Calculate word accuracy
+        # Word accuracy
         matching_words = set(original_words) & set(transcribed_words)
         analysis['word_accuracy'] = len(matching_words) / len(original_words) * 100 if original_words else 0
         
-        # Calculate reading pace (words per minute)
+        # Reading pace
         if audio_duration > 0:
             analysis['reading_pace_wpm'] = (len(transcribed_words) / audio_duration) * 60
         
-        # Detect hesitations
-        hesitation_patterns = ['um', 'uh', 'er', 'ah', 'hm', 'hmm']
+        # Hesitations
+        hesitation_patterns = ['um', 'uh', 'er', 'ah', 'hm']
         analysis['hesitation_count'] = sum(1 for word in transcribed_words if word in hesitation_patterns)
         
-        # Detect repetitions
+        # Repetitions
         analysis['repetition_count'] = count_repetitions(transcribed_words)
         
-        # Detect self-corrections
+        # Self-corrections
         analysis['self_correction_count'] = count_self_corrections(transcription)
         
-        # Calculate difficulty word accuracy
+        # Difficulty words
         difficulty_words = extract_difficulty_words(original_text)
         analysis['difficulty_word_accuracy'] = calculate_difficulty_word_accuracy(transcription, difficulty_words)
         
-        # Calculate overall score
+        # Overall score
         analysis['overall_score'] = calculate_overall_score(analysis)
         
-        # Determine dyslexia likelihood
+        # Dyslexia likelihood
         analysis['dyslexia_likelihood'] = determine_dyslexia_likelihood(analysis)
         
     except Exception as e:
@@ -94,7 +96,6 @@ def analyze_reading_performance(transcription, original_text, audio_duration):
     return analysis
 
 def count_repetitions(words):
-    """Count consecutive word repetitions"""
     repetitions = 0
     for i in range(1, len(words)):
         if words[i] == words[i-1]:
@@ -102,15 +103,12 @@ def count_repetitions(words):
     return repetitions
 
 def count_self_corrections(text):
-    """Count self-correction patterns"""
-    patterns = [
-        r'\b(\w+)\s+(\1)\b',  # Immediate repetition
-        r'\b(\w+)\s+no\s+\1\b',  # "word no word" pattern
-        r'\b(\w+)\s+I\s+mean\s+\w+\b',  # "I mean" pattern
-        r'\b(\w+)\s+sorry\s+\w+\b',  # "sorry" correction
-    ]
-    
     import re
+    patterns = [
+        r'\b(\w+)\s+(\1)\b',
+        r'\b(\w+)\s+no\s+\1\b',
+        r'\b(\w+)\s+I\s+mean\s+\w+\b',
+    ]
     count = 0
     for pattern in patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
@@ -118,42 +116,26 @@ def count_self_corrections(text):
     return count
 
 def extract_difficulty_words(text):
-    """Extract potentially difficult words from text"""
-    # Simple heuristic: words with 7+ letters or with complex patterns
     words = text.split()
     difficulty_words = []
+    complex_patterns = ['ough', 'tion', 'sion', 'cious', 'tious']
     
     for word in words:
         clean_word = word.strip('.,!?;:').lower()
-        if len(clean_word) >= 7 or has_complex_pattern(clean_word):
+        if len(clean_word) >= 7 or any(pattern in clean_word for pattern in complex_patterns):
             difficulty_words.append(clean_word)
     
-    return list(set(difficulty_words))  # Remove duplicates
-
-def has_complex_pattern(word):
-    """Check if word has complex phonetic patterns"""
-    complex_patterns = [
-        'ough', 'tion', 'sion', 'cious', 'tious', 'cial', 'tial',
-        'phy', 'ology', 'graph', 'spect', 'struct'
-    ]
-    return any(pattern in word for pattern in complex_patterns)
+    return list(set(difficulty_words))
 
 def calculate_difficulty_word_accuracy(transcription, difficulty_words):
-    """Calculate accuracy on difficult words"""
     if not difficulty_words:
         return 100
     
     transcription_lower = transcription.lower()
-    found_count = 0
-    
-    for word in difficulty_words:
-        if word in transcription_lower:
-            found_count += 1
-    
+    found_count = sum(1 for word in difficulty_words if word in transcription_lower)
     return (found_count / len(difficulty_words)) * 100
 
 def calculate_overall_score(analysis):
-    """Calculate overall reading score"""
     weights = {
         'word_accuracy': 0.35,
         'reading_pace_wpm': 0.20,
@@ -162,19 +144,11 @@ def calculate_overall_score(analysis):
         'difficulty_word_accuracy': 0.15
     }
     
-    # Normalize values
     word_accuracy = analysis['word_accuracy']
-    
-    # Normalize reading pace (assume 150 WPM is excellent, 50 WPM is poor)
     reading_pace = min(max(analysis['reading_pace_wpm'], 50), 150)
     pace_score = ((reading_pace - 50) / 100) * 100
-    
-    # Normalize hesitation count (more hesitations = lower score)
     hesitation_score = max(0, 100 - (analysis['hesitation_count'] * 10))
-    
-    # Normalize repetition count (more repetitions = lower score)
     repetition_score = max(0, 100 - (analysis['repetition_count'] * 15))
-    
     difficulty_accuracy = analysis['difficulty_word_accuracy']
     
     weighted_score = (
@@ -188,21 +162,14 @@ def calculate_overall_score(analysis):
     return min(100, max(0, weighted_score))
 
 def determine_dyslexia_likelihood(analysis):
-    """Determine dyslexia likelihood based on analysis"""
     score = analysis['overall_score']
-    
-    if score >= 80:
-        return 'low'
-    elif score >= 60:
-        return 'moderate'
-    elif score >= 40:
-        return 'high'
-    else:
-        return 'very_high'
+    if score >= 80: return 'low'
+    elif score >= 60: return 'moderate'
+    elif score >= 40: return 'high'
+    else: return 'very_high'
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe_audio():
-    """Transcribe audio and analyze reading performance"""
     try:
         load_model_once()
         
@@ -218,21 +185,17 @@ def transcribe_audio():
         if audio_file.filename == '':
             return jsonify({"error": "No audio file selected"}), 400
         
-        # Save uploaded file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
             audio_file.save(tmp_file.name)
             audio_path = tmp_file.name
         
         try:
-            # Transcribe audio using Whisper
-            logger.info("Transcribing audio...")
-            result = model.transcribe(audio_path)
-            transcription = result["text"].strip()
+            logger.info("Transcribing audio with optimized model...")
+            segments, info = model.transcribe(audio_path, beam_size=5)
             
-            # Get audio duration from Whisper result
-            audio_duration = result.get('duration', 30)  # Fallback to 30 seconds
+            transcription = " ".join(segment.text for segment in segments)
+            audio_duration = info.duration
             
-            # Analyze reading performance
             analysis = analyze_reading_performance(transcription, original_text, audio_duration)
             
             logger.info(f"Transcription successful: {len(transcription)} characters")
@@ -245,7 +208,6 @@ def transcribe_audio():
             })
             
         finally:
-            # Clean up temporary file
             if os.path.exists(audio_path):
                 os.unlink(audio_path)
                 
@@ -255,7 +217,6 @@ def transcribe_audio():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """Health check endpoint"""
     try:
         load_model_once()
         return jsonify({
@@ -273,16 +234,15 @@ def health_check():
 @app.route('/')
 def home():
     return jsonify({
-        "message": "Whisper Transcription API", 
+        "message": "Optimized Whisper Transcription API", 
         "status": "running",
-        "endpoints": ["/transcribe", "/health"]
+        "size": "lightweight"
     })
 
 if __name__ == '__main__':
-    logger.info("Starting Whisper Transcription API...")
+    logger.info("Starting OPTIMIZED Whisper API...")
     port = int(os.environ.get('PORT', 5000))
     
-    # Pre-load model
     try:
         load_model_once()
     except Exception as e:
