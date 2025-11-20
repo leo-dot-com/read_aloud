@@ -1,4 +1,4 @@
-# whisper_api.py - Local Whisper Transcription API (No FFmpeg)
+# whisper_api.py - Local Whisper Transcription API with FFmpeg
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -9,8 +9,8 @@ import tempfile
 import logging
 import json
 from datetime import datetime
-import numpy as np
 import subprocess
+import shutil
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,6 +22,20 @@ CORS(app)
 # Global model variable
 model = None
 
+def check_ffmpeg():
+    """Check if FFmpeg is available"""
+    try:
+        result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info("FFmpeg is available")
+            return True
+        else:
+            logger.error("FFmpeg check failed")
+            return False
+    except Exception as e:
+        logger.error(f"FFmpeg not found: {e}")
+        return False
+
 def load_model_once():
     """Load Whisper model only once when the API starts"""
     global model
@@ -31,12 +45,40 @@ def load_model_once():
     
     logger.info("Loading Whisper tiny model...")
     try:
-        # Using tiny model for faster inference on Railway
+        # Using tiny model for faster inference
         model = whisper.load_model("tiny")
         logger.info("Whisper model loaded successfully!")
     except Exception as e:
         logger.error(f"Failed to load Whisper model: {str(e)}")
         raise
+
+def convert_audio_to_wav(input_path, output_path):
+    """Convert any audio format to WAV using ffmpeg"""
+    try:
+        cmd = [
+            'ffmpeg', '-i', input_path,
+            '-acodec', 'pcm_s16le',
+            '-ac', '1',
+            '-ar', '16000',
+            '-y',  # Overwrite output file
+            output_path
+        ]
+        
+        logger.info(f"Converting audio: {input_path} -> {output_path}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            logger.error(f"FFmpeg conversion failed: {result.stderr}")
+            # Fallback: try without conversion
+            logger.info("Attempting fallback without conversion...")
+            return False
+            
+        logger.info("Audio converted successfully to WAV")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error in audio conversion: {str(e)}")
+        return False
 
 def analyze_reading_performance(transcription, original_text, audio_duration):
     """Analyze reading performance based on transcription"""
@@ -220,14 +262,26 @@ def transcribe_audio():
             return jsonify({"error": "No audio file selected"}), 400
         
         # Save uploaded file temporarily
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as tmp_file:
-            audio_file.save(tmp_file.name)
-            audio_path = tmp_file.name
+        input_ext = os.path.splitext(audio_file.filename)[1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=input_ext) as tmp_input:
+            audio_file.save(tmp_input.name)
+            input_path = tmp_input.name
+        
+        # Create output path for converted audio
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_output:
+            output_path = tmp_output.name
         
         try:
-            # Transcribe audio using Whisper - let Whisper handle the format
+            # Convert audio to WAV format for better compatibility
+            logger.info("Converting audio to WAV format...")
+            conversion_success = convert_audio_to_wav(input_path, output_path)
+            
+            # Use converted file if successful, otherwise try original
+            audio_file_path = output_path if conversion_success else input_path
+            
+            # Transcribe audio using Whisper
             logger.info("Transcribing audio...")
-            result = model.transcribe(audio_path)
+            result = model.transcribe(audio_file_path)
             transcription = result["text"].strip()
             
             # Get audio duration from Whisper result
@@ -246,22 +300,28 @@ def transcribe_audio():
             })
             
         finally:
-            # Clean up temporary file
-            if os.path.exists(audio_path):
-                os.unlink(audio_path)
+            # Clean up temporary files
+            for temp_file in [input_path, output_path]:
+                if os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
                 
     except Exception as e:
         logger.error(f"Error in transcribe_audio: {str(e)}")
         return jsonify({"error": str(e)}), 500
-        
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     try:
         load_model_once()
+        ffmpeg_available = check_ffmpeg()
         return jsonify({
             "status": "healthy", 
             "model_loaded": model is not None,
+            "ffmpeg_available": ffmpeg_available,
             "ready": True,
             "timestamp": datetime.now().isoformat()
         })
@@ -281,7 +341,9 @@ def home():
 
 if __name__ == '__main__':
     logger.info("Starting Whisper Transcription API...")
-    port = int(os.environ.get('PORT', 5000))
+    
+    # Check FFmpeg availability
+    check_ffmpeg()
     
     # Pre-load model
     try:
@@ -289,4 +351,5 @@ if __name__ == '__main__':
     except Exception as e:
         logger.warning(f"Initial model load failed: {str(e)}")
     
+    port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port, debug=False)
