@@ -1,10 +1,8 @@
 {
   "build": {
-    "builder": "nixpacks",
-    "buildCommand": "apt-get update && apt-get install -y ffmpeg libsndfile1"
+    "builder": "nixpacks"
   },
   "deploy": {
-    "startCommand": "python whisper_api.py",
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }
