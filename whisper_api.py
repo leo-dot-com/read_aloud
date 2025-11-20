@@ -41,7 +41,7 @@ MODEL_CONFIGS = {
 }
 
 # Use tiny model for Railway to avoid memory issues
-SELECTED_MODEL = "tiny"
+SELECTED_MODEL = "small"
 logger.info(f"Using model: {SELECTED_MODEL}")
 
 def load_whisper_model():
