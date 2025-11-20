@@ -15,7 +15,7 @@ app = Flask(__name__)
 CORS(app)
 
 # Hugging Face Inference API - FREE tier
-HF_API_URL = "https://api-inference.huggingface.co/models/openai/whisper-tiny"
+HF_API_URL = "https://router.huggingface.co/hf-inference/models/openai/whisper-base"
 HF_TOKEN = os.environ.get("HF_TOKEN", "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")
 
 headers = {"Authorization": f"Bearer {HF_TOKEN}"}
