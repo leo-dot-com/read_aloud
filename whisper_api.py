@@ -1,4 +1,4 @@
-# whisper_api.py - Local Whisper Transcription API
+# whisper_api.py - Local Whisper Transcription API (No FFmpeg)
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -10,6 +10,7 @@ import logging
 import json
 from datetime import datetime
 import numpy as np
+import subprocess
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -200,30 +201,6 @@ def determine_dyslexia_likelihood(analysis):
     else:
         return 'very_high'
 
-def convert_audio_to_wav(input_path, output_path):
-    """Convert any audio format to WAV using ffmpeg"""
-    try:
-        cmd = [
-            'ffmpeg', '-i', input_path,
-            '-acodec', 'pcm_s16le',
-            '-ac', '1',
-            '-ar', '16000',
-            '-y',  # Overwrite output file
-            output_path
-        ]
-        
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            logger.error(f"FFmpeg conversion failed: {result.stderr}")
-            raise Exception(f"Audio conversion failed: {result.stderr}")
-            
-        logger.info("Audio converted successfully to WAV")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error in audio conversion: {str(e)}")
-        raise
-
 @app.route('/transcribe', methods=['POST'])
 def transcribe_audio():
     """Transcribe audio and analyze reading performance"""
@@ -243,23 +220,14 @@ def transcribe_audio():
             return jsonify({"error": "No audio file selected"}), 400
         
         # Save uploaded file temporarily
-        input_ext = os.path.splitext(audio_file.filename)[1].lower()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=input_ext) as tmp_input:
-            audio_file.save(tmp_input.name)
-            input_path = tmp_input.name
-        
-        # Create output path for converted audio
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_output:
-            output_path = tmp_output.name
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as tmp_file:
+            audio_file.save(tmp_file.name)
+            audio_path = tmp_file.name
         
         try:
-            # Convert audio to WAV format for better compatibility
-            logger.info("Converting audio to WAV format...")
-            convert_audio_to_wav(input_path, output_path)
-            
-            # Transcribe audio using Whisper
+            # Transcribe audio using Whisper - let Whisper handle the format
             logger.info("Transcribing audio...")
-            result = model.transcribe(output_path)
+            result = model.transcribe(audio_path)
             transcription = result["text"].strip()
             
             # Get audio duration from Whisper result
@@ -278,10 +246,9 @@ def transcribe_audio():
             })
             
         finally:
-            # Clean up temporary files
-            for temp_file in [input_path, output_path]:
-                if os.path.exists(temp_file):
-                    os.unlink(temp_file)
+            # Clean up temporary file
+            if os.path.exists(audio_path):
+                os.unlink(audio_path)
                 
     except Exception as e:
         logger.error(f"Error in transcribe_audio: {str(e)}")
