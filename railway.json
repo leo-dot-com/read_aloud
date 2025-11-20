@@ -1,6 +1,7 @@
 {
   "build": {
-    "builder": "NIXPACKS"
+    "builder": "NIXPACKS",
+    "buildCommand": "apt-get update && apt-get install -y ffmpeg"
   },
   "deploy": {
     "startCommand": "python whisper_api.py",
