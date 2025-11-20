@@ -1,131 +1,42 @@
-# whisper_local.py - Local Whisper implementation
+# whisper_api.py - Local Whisper Transcription API
 import os
-import torch
-import torchaudio
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+import whisper
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import tempfile
 import logging
-import librosa
-import soundfile as sf
+import json
 from datetime import datetime
-import re
+import numpy as np
 
+# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 CORS(app)
 
-# Try to use transformers first, fall back to openai-whisper
-try:
-    from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
-    TRANSFORMERS_AVAILABLE = True
-    logger.info("Using transformers implementation")
-except ImportError:
-    TRANSFORMERS_AVAILABLE = False
-    logger.info("Transformers not available, trying openai-whisper")
-    try:
-        import whisper
-        WHISPER_AVAILABLE = True
-    except ImportError:
-        WHISPER_AVAILABLE = False
-        logger.error("Neither transformers nor whisper available")
-
-# Model configuration - using smaller models for Railway compatibility
-MODEL_CONFIGS = {
-    "tiny": {"params": "39M", "recommended": True},
-    "base": {"params": "74M", "recommended": True},
-    "small": {"params": "244M", "recommended": False},
-    "medium": {"params": "769M", "recommended": False},
-}
-
-# Use tiny model for Railway to avoid memory issues
-SELECTED_MODEL = "small"
-logger.info(f"Using model: {SELECTED_MODEL}")
-
-def load_whisper_model():
-    """Load Whisper model based on available libraries"""
-    try:
-        if TRANSFORMERS_AVAILABLE:
-            logger.info("Loading model with transformers...")
-            model_id = f"openai/whisper-{SELECTED_MODEL}"
-            
-            # Use pipeline for simplicity
-            pipe = pipeline(
-                "automatic-speech-recognition",
-                model=model_id,
-                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                device="cuda:0" if torch.cuda.is_available() else "cpu",
-            )
-            return {"type": "transformers", "model": pipe}
-        
-        elif WHISPER_AVAILABLE:
-            logger.info("Loading model with openai-whisper...")
-            model = whisper.load_model(SELECTED_MODEL)
-            return {"type": "whisper", "model": model}
-        else:
-            raise Exception("No Whisper implementation available")
-            
-    except Exception as e:
-        logger.error(f"Model loading failed: {str(e)}")
-        raise
-
 # Global model variable
-whisper_model = None
+model = None
 
-def transcribe_local(audio_path):
-    """Transcribe audio using local Whisper model"""
-    global whisper_model
+def load_model_once():
+    """Load Whisper model only once when the API starts"""
+    global model
     
-    if whisper_model is None:
-        whisper_model = load_whisper_model()
+    if model is not None:
+        return
     
-    # Get audio duration
+    logger.info("Loading Whisper tiny model...")
     try:
-        audio_duration = librosa.get_duration(filename=audio_path)
-        logger.info(f"Audio duration: {audio_duration:.2f} seconds")
+        # Using tiny model for faster inference on Railway
+        model = whisper.load_model("tiny")
+        logger.info("Whisper model loaded successfully!")
     except Exception as e:
-        logger.warning(f"Could not get audio duration: {e}")
-        audio_duration = 30
-    
-    try:
-        if whisper_model["type"] == "transformers":
-            # Using transformers pipeline
-            result = whisper_model["model"](
-                audio_path,
-                generate_kwargs={"language": "english", "task": "transcribe"}
-            )
-            transcription = result["text"]
-            
-        else:  # Using openai-whisper
-            result = whisper_model["model"].transcribe(audio_path, language="english")
-            transcription = result["text"]
-        
-        logger.info(f"Transcription successful: {len(transcription)} characters")
-        return transcription, audio_duration
-        
-    except Exception as e:
-        logger.error(f"Transcription failed: {str(e)}")
+        logger.error(f"Failed to load Whisper model: {str(e)}")
         raise
 
-def convert_audio_format(audio_path):
-    """Convert audio to 16kHz WAV format for better compatibility"""
-    try:
-        # Load audio file
-        y, sr = librosa.load(audio_path, sr=16000)
-        
-        # Create temporary file for converted audio
-        converted_path = audio_path + "_converted.wav"
-        sf.write(converted_path, y, sr, format='WAV', subtype='PCM_16')
-        
-        logger.info("Audio conversion successful")
-        return converted_path
-    except Exception as e:
-        logger.warning(f"Audio conversion failed: {e}, using original file")
-        return audio_path
-
-# Keep your existing analysis functions (they don't need to change)
 def analyze_reading_performance(transcription, original_text, audio_duration):
     """Analyze reading performance based on transcription"""
     analysis = {
@@ -141,68 +52,49 @@ def analyze_reading_performance(transcription, original_text, audio_duration):
     }
     
     try:
+        # Convert to lowercase for comparison
         original_lower = original_text.lower()
         transcription_lower = transcription.lower()
         
-        # Clean and prepare word lists
-        original_words = [re.sub(r'[^\w\s]', '', word) for word in original_lower.split()]
-        transcribed_words = [re.sub(r'[^\w\s]', '', word) for word in transcription_lower.split()]
+        # Split into words
+        original_words = [word.strip('.,!?;:') for word in original_lower.split()]
+        transcribed_words = [word.strip('.,!?;:') for word in transcription_lower.split()]
         
-        # Remove empty strings
-        original_words = [word for word in original_words if word]
-        transcribed_words = [word for word in transcribed_words if word]
+        # Calculate word accuracy
+        matching_words = set(original_words) & set(transcribed_words)
+        analysis['word_accuracy'] = len(matching_words) / len(original_words) * 100 if original_words else 0
         
-        # Word accuracy using sequence matching
-        analysis['word_accuracy'] = calculate_sequence_accuracy(original_words, transcribed_words)
-        
-        # Reading pace
+        # Calculate reading pace (words per minute)
         if audio_duration > 0:
             analysis['reading_pace_wpm'] = (len(transcribed_words) / audio_duration) * 60
         
-        # Hesitations
-        hesitation_patterns = ['um', 'uh', 'er', 'ah', 'hm', 'hmm', 'eh', 'mm']
+        # Detect hesitations
+        hesitation_patterns = ['um', 'uh', 'er', 'ah', 'hm', 'hmm']
         analysis['hesitation_count'] = sum(1 for word in transcribed_words if word in hesitation_patterns)
         
-        # Repetitions
+        # Detect repetitions
         analysis['repetition_count'] = count_repetitions(transcribed_words)
         
-        # Self-corrections
+        # Detect self-corrections
         analysis['self_correction_count'] = count_self_corrections(transcription)
         
-        # Difficulty words
+        # Calculate difficulty word accuracy
         difficulty_words = extract_difficulty_words(original_text)
         analysis['difficulty_word_accuracy'] = calculate_difficulty_word_accuracy(transcription, difficulty_words)
         
-        # Overall score
+        # Calculate overall score
         analysis['overall_score'] = calculate_overall_score(analysis)
         
-        # Dyslexia likelihood
+        # Determine dyslexia likelihood
         analysis['dyslexia_likelihood'] = determine_dyslexia_likelihood(analysis)
         
     except Exception as e:
         logger.error(f"Error in reading analysis: {str(e)}")
-        # Set default values
-        analysis['word_accuracy'] = 50
-        analysis['reading_pace_wpm'] = 100
-        analysis['overall_score'] = 50
     
     return analysis
 
-def calculate_sequence_accuracy(original, transcribed):
-    """Calculate accuracy based on word sequence matching"""
-    if not original:
-        return 0
-    
-    matches = 0
-    min_len = min(len(original), len(transcribed))
-    
-    for i in range(min_len):
-        if original[i] == transcribed[i]:
-            matches += 1
-    
-    return (matches / len(original)) * 100
-
 def count_repetitions(words):
+    """Count consecutive word repetitions"""
     repetitions = 0
     for i in range(1, len(words)):
         if words[i] == words[i-1]:
@@ -210,13 +102,15 @@ def count_repetitions(words):
     return repetitions
 
 def count_self_corrections(text):
+    """Count self-correction patterns"""
     patterns = [
-        r'\b(\w+)\s+(\1)\b',
-        r'\b(\w+)\s+no\s+\1\b',
-        r'\b(\w+)\s+I\s+mean\s+\w+\b',
-        r'\b(\w+)\s+sorry\s+\w+\b',
+        r'\b(\w+)\s+(\1)\b',  # Immediate repetition
+        r'\b(\w+)\s+no\s+\1\b',  # "word no word" pattern
+        r'\b(\w+)\s+I\s+mean\s+\w+\b',  # "I mean" pattern
+        r'\b(\w+)\s+sorry\s+\w+\b',  # "sorry" correction
     ]
     
+    import re
     count = 0
     for pattern in patterns:
         matches = re.findall(pattern, text, re.IGNORECASE)
@@ -224,17 +118,28 @@ def count_self_corrections(text):
     return count
 
 def extract_difficulty_words(text):
+    """Extract potentially difficult words from text"""
+    # Simple heuristic: words with 7+ letters or with complex patterns
     words = text.split()
     difficulty_words = []
     
     for word in words:
-        clean_word = re.sub(r'[^\w\s]', '', word).lower()
-        if len(clean_word) >= 7:
+        clean_word = word.strip('.,!?;:').lower()
+        if len(clean_word) >= 7 or has_complex_pattern(clean_word):
             difficulty_words.append(clean_word)
     
-    return list(set(difficulty_words))[:5]
+    return list(set(difficulty_words))  # Remove duplicates
+
+def has_complex_pattern(word):
+    """Check if word has complex phonetic patterns"""
+    complex_patterns = [
+        'ough', 'tion', 'sion', 'cious', 'tious', 'cial', 'tial',
+        'phy', 'ology', 'graph', 'spect', 'struct'
+    ]
+    return any(pattern in word for pattern in complex_patterns)
 
 def calculate_difficulty_word_accuracy(transcription, difficulty_words):
+    """Calculate accuracy on difficult words"""
     if not difficulty_words:
         return 100
     
@@ -248,6 +153,7 @@ def calculate_difficulty_word_accuracy(transcription, difficulty_words):
     return (found_count / len(difficulty_words)) * 100
 
 def calculate_overall_score(analysis):
+    """Calculate overall reading score"""
     weights = {
         'word_accuracy': 0.35,
         'reading_pace_wpm': 0.20,
@@ -256,16 +162,17 @@ def calculate_overall_score(analysis):
         'difficulty_word_accuracy': 0.15
     }
     
+    # Normalize values
     word_accuracy = analysis['word_accuracy']
     
-    # Normalize reading pace
+    # Normalize reading pace (assume 150 WPM is excellent, 50 WPM is poor)
     reading_pace = min(max(analysis['reading_pace_wpm'], 50), 150)
     pace_score = ((reading_pace - 50) / 100) * 100
     
-    # Normalize hesitation count
+    # Normalize hesitation count (more hesitations = lower score)
     hesitation_score = max(0, 100 - (analysis['hesitation_count'] * 10))
     
-    # Normalize repetition count
+    # Normalize repetition count (more repetitions = lower score)
     repetition_score = max(0, 100 - (analysis['repetition_count'] * 15))
     
     difficulty_accuracy = analysis['difficulty_word_accuracy']
@@ -281,7 +188,9 @@ def calculate_overall_score(analysis):
     return min(100, max(0, weighted_score))
 
 def determine_dyslexia_likelihood(analysis):
+    """Determine dyslexia likelihood based on analysis"""
     score = analysis['overall_score']
+    
     if score >= 80:
         return 'low'
     elif score >= 60:
@@ -293,7 +202,10 @@ def determine_dyslexia_likelihood(analysis):
 
 @app.route('/transcribe', methods=['POST'])
 def transcribe_audio():
+    """Transcribe audio and analyze reading performance"""
     try:
+        load_model_once()
+        
         if 'audio' not in request.files:
             return jsonify({"error": "No audio file uploaded"}), 400
         
@@ -306,41 +218,36 @@ def transcribe_audio():
         if audio_file.filename == '':
             return jsonify({"error": "No audio file selected"}), 400
         
+        # Save uploaded file temporarily
         with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as tmp_file:
             audio_file.save(tmp_file.name)
             audio_path = tmp_file.name
         
         try:
-            logger.info("Starting local transcription...")
+            # Transcribe audio using Whisper
+            logger.info("Transcribing audio...")
+            result = model.transcribe(audio_path)
+            transcription = result["text"].strip()
             
-            # Convert audio if needed
-            converted_path = convert_audio_format(audio_path)
+            # Get audio duration from Whisper result
+            audio_duration = result.get('duration', 30)  # Fallback to 30 seconds
             
-            # Transcribe using local model
-            transcription, audio_duration = transcribe_local(converted_path)
-            
-            logger.info("Transcription completed, starting analysis...")
+            # Analyze reading performance
             analysis = analyze_reading_performance(transcription, original_text, audio_duration)
+            
+            logger.info(f"Transcription successful: {len(transcription)} characters")
             
             return jsonify({
                 "success": True,
                 "transcription": transcription,
                 "analysis": analysis,
-                "audio_duration": audio_duration,
-                "model_used": f"local-whisper-{SELECTED_MODEL}"
+                "audio_duration": audio_duration
             })
             
-        except Exception as e:
-            logger.error(f"Transcription error: {str(e)}")
-            return jsonify({"error": f"Transcription failed: {str(e)}"}), 500
-            
         finally:
-            # Clean up temporary files
+            # Clean up temporary file
             if os.path.exists(audio_path):
                 os.unlink(audio_path)
-            converted_path = audio_path + "_converted.wav"
-            if os.path.exists(converted_path):
-                os.unlink(converted_path)
                 
     except Exception as e:
         logger.error(f"Error in transcribe_audio: {str(e)}")
@@ -348,22 +255,37 @@ def transcribe_audio():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    model_status = "loaded" if whisper_model is not None else "not loaded"
-    return jsonify({
-        "status": "healthy", 
-        "timestamp": datetime.now().isoformat(),
-        "model_status": model_status,
-        "model_type": SELECTED_MODEL
-    })
+    """Health check endpoint"""
+    try:
+        load_model_once()
+        return jsonify({
+            "status": "healthy", 
+            "model_loaded": model is not None,
+            "ready": True,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        }), 500
 
 @app.route('/')
 def home():
     return jsonify({
-        "message": "Local Whisper Transcription API", 
+        "message": "Whisper Transcription API", 
         "status": "running",
-        "model": SELECTED_MODEL
+        "endpoints": ["/transcribe", "/health"]
     })
 
 if __name__ == '__main__':
+    logger.info("Starting Whisper Transcription API...")
     port = int(os.environ.get('PORT', 5000))
+    
+    # Pre-load model
+    try:
+        load_model_once()
+    except Exception as e:
+        logger.warning(f"Initial model load failed: {str(e)}")
+    
     app.run(host='0.0.0.0', port=port, debug=False)
