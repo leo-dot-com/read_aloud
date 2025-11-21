@@ -43,24 +43,18 @@ def load_model_once():
     if model is not None:
         return
     
-    logger.info("Loading Whisper tiny model...")
+    logger.info("Loading Whisper large model...")
     try:
-        # Using tiny model for faster inference
-        model = whisper.load_model("tiny")
+        # Using large model for faster inference
+        model = whisper.load_model("large")
         logger.info("Whisper model loaded successfully!")
     except Exception as e:
         logger.error(f"Failed to load Whisper model: {str(e)}")
         raise
 
-# Update the convert_audio_to_wav function to be more robust
 def convert_audio_to_wav(input_path, output_path):
-    """Convert any audio format to WAV using ffmpeg with better error handling"""
+    """Convert any audio format to WAV using ffmpeg"""
     try:
-        # Check if input file exists and has content
-        if not os.path.exists(input_path) or os.path.getsize(input_path) == 0:
-            logger.error(f"Input file is empty or doesn't exist: {input_path}")
-            return False
-        
         cmd = [
             'ffmpeg', '-i', input_path,
             '-acodec', 'pcm_s16le',
@@ -71,23 +65,17 @@ def convert_audio_to_wav(input_path, output_path):
         ]
         
         logger.info(f"Converting audio: {input_path} -> {output_path}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode != 0:
             logger.error(f"FFmpeg conversion failed: {result.stderr}")
-            return False
-        
-        # Check if output file was created and has content
-        if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
-            logger.error("FFmpeg conversion resulted in empty output file")
+            # Fallback: try without conversion
+            logger.info("Attempting fallback without conversion...")
             return False
             
         logger.info("Audio converted successfully to WAV")
         return True
         
-    except subprocess.TimeoutExpired:
-        logger.error("FFmpeg conversion timed out")
-        return False
     except Exception as e:
         logger.error(f"Error in audio conversion: {str(e)}")
         return False
@@ -193,11 +181,10 @@ def count_self_corrections(text):
         count += len(matches)
     return count
 
-# Add this function to handle the new transcription method
 def transcribe_with_timestamps(audio_file_path):
-    """Transcribe audio with word-level timestamps with fallback"""
+    """Transcribe audio with word-level timestamps"""
     try:
-        # Try to get word-level timestamps
+        # Use word_timestamps=True to get word-level timestamps
         result = model.transcribe(audio_file_path, word_timestamps=True)
         
         # Extract words with timestamps
@@ -214,7 +201,7 @@ def transcribe_with_timestamps(audio_file_path):
         return result["text"].strip(), words_with_timestamps, result.get('duration', 0)
     
     except Exception as e:
-        logger.warning(f"Word-level timestamp failed, falling back to basic transcription: {str(e)}")
+        logger.error(f"Error in transcription with timestamps: {str(e)}")
         # Fallback to basic transcription
         result = model.transcribe(audio_file_path)
         return result["text"].strip(), [], result.get('duration', 0)
@@ -468,8 +455,7 @@ def determine_dyslexia_likelihood(analysis):
     else:
         return 'very_high'
 
-# Update the transcribe_audio function in whisper_api.py
-
+# Update the main transcribe function
 @app.route('/transcribe', methods=['POST'])
 def transcribe_audio():
     """Transcribe audio and analyze reading performance"""
@@ -477,32 +463,19 @@ def transcribe_audio():
         load_model_once()
         
         if 'audio' not in request.files:
-            return jsonify({"success": False, "error": "No audio file uploaded"}), 400
+            return jsonify({"error": "No audio file uploaded"}), 400
         
         if 'original_text' not in request.form:
-            return jsonify({"success": False, "error": "No original text provided"}), 400
+            return jsonify({"error": "No original text provided"}), 400
         
         audio_file = request.files['audio']
         original_text = request.form['original_text']
         
         if audio_file.filename == '':
-            return jsonify({"success": False, "error": "No audio file selected"}), 400
-        
-        # Validate file size
-        audio_file.seek(0, 2)  # Seek to end to get file size
-        file_size = audio_file.tell()
-        audio_file.seek(0)  # Reset seek position
-        
-        if file_size > 50 * 1024 * 1024:  # 50MB limit
-            return jsonify({"success": False, "error": "Audio file too large. Maximum size is 50MB."}), 400
+            return jsonify({"error": "No audio file selected"}), 400
         
         # Save uploaded file temporarily
         input_ext = os.path.splitext(audio_file.filename)[1].lower()
-        allowed_extensions = ['.wav', '.mp3', '.m4a', '.webm', '.ogg', '.flac', '.aac']
-        
-        if input_ext not in allowed_extensions:
-            return jsonify({"success": False, "error": f"Unsupported audio format. Allowed: {', '.join(allowed_extensions)}"}), 400
-        
         with tempfile.NamedTemporaryFile(delete=False, suffix=input_ext) as tmp_input:
             audio_file.save(tmp_input.name)
             input_path = tmp_input.name
@@ -518,10 +491,6 @@ def transcribe_audio():
             
             # Use converted file if successful, otherwise try original
             audio_file_path = output_path if conversion_success else input_path
-            
-            # Check if converted file exists and has content
-            if not os.path.exists(audio_file_path) or os.path.getsize(audio_file_path) == 0:
-                return jsonify({"success": False, "error": "Audio conversion failed or resulted in empty file"}), 400
             
             # Transcribe audio using Whisper with timestamps
             logger.info("Transcribing audio with timestamps...")
@@ -549,7 +518,7 @@ def transcribe_audio():
             
             logger.info(f"Enhanced transcription successful: {len(transcription)} characters")
             
-            response_data = {
+            return jsonify({
                 "success": True,
                 "transcription": transcription,
                 "analysis": analysis,
@@ -561,13 +530,7 @@ def transcribe_audio():
                     "text_comparison": text_comparison,
                     "words_with_timestamps": words_with_timestamps
                 }
-            }
-            
-            return jsonify(response_data)
-            
-        except Exception as e:
-            logger.error(f"Error in transcription process: {str(e)}")
-            return jsonify({"success": False, "error": f"Transcription failed: {str(e)}"}), 500
+            })
             
         finally:
             # Clean up temporary files
@@ -575,17 +538,13 @@ def transcribe_audio():
                 if os.path.exists(temp_file):
                     try:
                         os.unlink(temp_file)
-                    except Exception as e:
-                        logger.warning(f"Failed to delete temp file {temp_file}: {str(e)}")
+                    except:
+                        pass
                 
     except Exception as e:
-        logger.error(f"Error in transcribe_audio endpoint: {str(e)}")
-        return jsonify({"success": False, "error": f"Server error: {str(e)}"}), 500
+        logger.error(f"Error in transcribe_audio: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
-
-
-
-        
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
