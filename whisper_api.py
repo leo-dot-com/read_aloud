@@ -80,61 +80,82 @@ def convert_audio_to_wav(input_path, output_path):
         logger.error(f"Error in audio conversion: {str(e)}")
         return False
 
-def analyze_reading_performance(transcription, original_text, audio_duration):
-    """Analyze reading performance based on transcription"""
+def analyze_reading_performance(transcription, original_text, audio_duration, 
+                              pauses=None, hesitations=None, fluency_metrics=None, text_comparison=None):
+    """Enhanced reading performance analysis"""
+    
+    # Initialize with default values
+    pauses = pauses or []
+    hesitations = hesitations or []
+    fluency_metrics = fluency_metrics or {}
+    text_comparison = text_comparison or {}
+    
     analysis = {
-        'word_accuracy': 0,
-        'reading_pace_wpm': 0,
-        'hesitation_count': 0,
-        'repetition_count': 0,
+        'word_accuracy': text_comparison.get('word_accuracy', 0),
+        'reading_pace_wpm': fluency_metrics.get('words_per_minute', 0),
+        'hesitation_count': len(hesitations),
+        'repetition_count': 0,  # You can add repetition detection
         'self_correction_count': 0,
         'difficulty_word_accuracy': 0,
+        'pause_count': len(pauses),
+        'total_pause_duration': sum(pause['gap_duration'] for pause in pauses),
+        'fluency_consistency': fluency_metrics.get('speaking_rate_consistency', 100),
+        'error_count': text_comparison.get('total_errors', 0),
         'overall_score': 0,
         'dyslexia_likelihood': 'low',
         'audio_duration': audio_duration
     }
     
-    try:
-        # Convert to lowercase for comparison
-        original_lower = original_text.lower()
-        transcription_lower = transcription.lower()
-        
-        # Split into words
-        original_words = [word.strip('.,!?;:') for word in original_lower.split()]
-        transcribed_words = [word.strip('.,!?;:') for word in transcription_lower.split()]
-        
-        # Calculate word accuracy
-        matching_words = set(original_words) & set(transcribed_words)
-        analysis['word_accuracy'] = len(matching_words) / len(original_words) * 100 if original_words else 0
-        
-        # Calculate reading pace (words per minute)
-        if audio_duration > 0:
-            analysis['reading_pace_wpm'] = (len(transcribed_words) / audio_duration) * 60
-        
-        # Detect hesitations
-        hesitation_patterns = ['um', 'uh', 'er', 'ah', 'hm', 'hmm']
-        analysis['hesitation_count'] = sum(1 for word in transcribed_words if word in hesitation_patterns)
-        
-        # Detect repetitions
-        analysis['repetition_count'] = count_repetitions(transcribed_words)
-        
-        # Detect self-corrections
-        analysis['self_correction_count'] = count_self_corrections(transcription)
-        
-        # Calculate difficulty word accuracy
-        difficulty_words = extract_difficulty_words(original_text)
-        analysis['difficulty_word_accuracy'] = calculate_difficulty_word_accuracy(transcription, difficulty_words)
-        
-        # Calculate overall score
-        analysis['overall_score'] = calculate_overall_score(analysis)
-        
-        # Determine dyslexia likelihood
-        analysis['dyslexia_likelihood'] = determine_dyslexia_likelihood(analysis)
-        
-    except Exception as e:
-        logger.error(f"Error in reading analysis: {str(e)}")
+    # Calculate overall score with enhanced factors
+    analysis['overall_score'] = calculate_enhanced_score(analysis, text_comparison)
+    analysis['dyslexia_likelihood'] = determine_dyslexia_likelihood(analysis)
     
     return analysis
+
+def calculate_enhanced_score(analysis, text_comparison):
+    """Calculate enhanced overall score considering dyslexia indicators"""
+    weights = {
+        'word_accuracy': 0.25,
+        'fluency_consistency': 0.20,
+        'hesitation_count': 0.15,
+        'pause_count': 0.10,
+        'error_count': 0.20,
+        'reading_pace_wpm': 0.10
+    }
+    
+    # Normalize values
+    word_accuracy = analysis['word_accuracy']
+    fluency_consistency = analysis['fluency_consistency']
+    
+    # Normalize hesitation count (more hesitations = lower score)
+    hesitation_score = max(0, 100 - (analysis['hesitation_count'] * 8))
+    
+    # Normalize pause count (more pauses = lower score)
+    pause_score = max(0, 100 - (analysis['pause_count'] * 5))
+    
+    # Normalize error count
+    max_expected_errors = text_comparison.get('original_word_count', 50) * 0.3  # Allow 30% errors
+    error_score = max(0, 100 - (analysis['error_count'] / max_expected_errors * 100)) if max_expected_errors > 0 else 100
+    
+    # Normalize reading pace (optimal range 100-150 WPM for children)
+    reading_pace = min(max(analysis['reading_pace_wpm'], 50), 200)
+    if reading_pace < 80:
+        pace_score = (reading_pace / 80) * 100
+    elif reading_pace > 150:
+        pace_score = max(0, 100 - ((reading_pace - 150) / 50 * 100))
+    else:
+        pace_score = 100
+    
+    weighted_score = (
+        word_accuracy * weights['word_accuracy'] +
+        fluency_consistency * weights['fluency_consistency'] +
+        hesitation_score * weights['hesitation_count'] +
+        pause_score * weights['pause_count'] +
+        error_score * weights['error_count'] +
+        pace_score * weights['reading_pace_wpm']
+    )
+    
+    return min(100, max(0, weighted_score))
 
 def count_repetitions(words):
     """Count consecutive word repetitions"""
@@ -159,6 +180,197 @@ def count_self_corrections(text):
         matches = re.findall(pattern, text, re.IGNORECASE)
         count += len(matches)
     return count
+
+def transcribe_with_timestamps(audio_file_path):
+    """Transcribe audio with word-level timestamps"""
+    try:
+        # Use word_timestamps=True to get word-level timestamps
+        result = model.transcribe(audio_file_path, word_timestamps=True)
+        
+        # Extract words with timestamps
+        words_with_timestamps = []
+        for segment in result.get("segments", []):
+            for word_info in segment.get("words", []):
+                words_with_timestamps.append({
+                    'word': word_info['word'].strip(),
+                    'start': word_info['start'],
+                    'end': word_info['end'],
+                    'confidence': word_info.get('probability', 0)
+                })
+        
+        return result["text"].strip(), words_with_timestamps, result.get('duration', 0)
+    
+    except Exception as e:
+        logger.error(f"Error in transcription with timestamps: {str(e)}")
+        # Fallback to basic transcription
+        result = model.transcribe(audio_file_path)
+        return result["text"].strip(), [], result.get('duration', 0)
+
+def detect_pauses_and_hesitations(words_with_timestamps, pause_threshold=0.8, hesitation_threshold=2.0):
+    """Detect pauses and hesitations between words"""
+    pauses = []
+    hesitations = []
+    
+    if len(words_with_timestamps) < 2:
+        return pauses, hesitations
+    
+    for i in range(1, len(words_with_timestamps)):
+        current_word = words_with_timestamps[i]
+        previous_word = words_with_timestamps[i-1]
+        
+        gap = current_word['start'] - previous_word['end']
+        
+        # Detect pauses (unusually long gaps between words)
+        if gap > pause_threshold:
+            pauses.append({
+                'position': i,
+                'gap_duration': gap,
+                'before_word': previous_word['word'],
+                'after_word': current_word['word']
+            })
+        
+        # Detect hesitations (very long gaps)
+        if gap > hesitation_threshold:
+            hesitations.append({
+                'position': i,
+                'gap_duration': gap,
+                'before_word': previous_word['word'],
+                'after_word': current_word['word']
+            })
+    
+    return pauses, hesitations
+
+def analyze_reading_fluency(words_with_timestamps, audio_duration):
+    """Analyze reading fluency metrics"""
+    if not words_with_timestamps or len(words_with_timestamps) < 2:
+        return {
+            'words_per_minute': 0,
+            'avg_pause_duration': 0,
+            'pause_frequency': 0,
+            'speaking_rate_consistency': 100
+        }
+    
+    # Calculate words per minute
+    total_words = len(words_with_timestamps)
+    words_per_minute = (total_words / audio_duration) * 60 if audio_duration > 0 else 0
+    
+    # Calculate pause statistics
+    pause_durations = []
+    for i in range(1, len(words_with_timestamps)):
+        gap = words_with_timestamps[i]['start'] - words_with_timestamps[i-1]['end']
+        if gap > 0.1:  # Only count gaps > 100ms as pauses
+            pause_durations.append(gap)
+    
+    avg_pause_duration = sum(pause_durations) / len(pause_durations) if pause_durations else 0
+    pause_frequency = len(pause_durations) / total_words if total_words > 0 else 0
+    
+    # Calculate speaking rate consistency (variation in word durations)
+    word_durations = [word['end'] - word['start'] for word in words_with_timestamps]
+    avg_word_duration = sum(word_durations) / len(word_durations) if word_durations else 0
+    
+    # Coefficient of variation for speaking rate consistency
+    if avg_word_duration > 0:
+        variance = sum((duration - avg_word_duration) ** 2 for duration in word_durations) / len(word_durations)
+        std_dev = variance ** 0.5
+        consistency = max(0, 100 - (std_dev / avg_word_duration * 100))
+    else:
+        consistency = 100
+    
+    return {
+        'words_per_minute': round(words_per_minute, 2),
+        'avg_pause_duration': round(avg_pause_duration, 2),
+        'pause_frequency': round(pause_frequency, 4),
+        'speaking_rate_consistency': round(consistency, 2)
+    }
+
+def advanced_text_comparison(transcription, original_text, words_with_timestamps):
+    """Compare transcription to original text with detailed analysis"""
+    
+    # Normalize texts for comparison
+    original_lower = original_text.lower()
+    transcription_lower = transcription.lower()
+    
+    # Split into words, preserving some punctuation for context
+    original_words = [word.strip('.,!?;:"').lower() for word in original_text.split()]
+    transcribed_words = [word.strip('.,!?;:"').lower() for word in transcription.split()]
+    
+    # Initialize error tracking
+    errors = {
+        'omissions': [],
+        'additions': [],
+        'substitutions': [],
+        'inversions': [],
+        'line_jumps': 0,
+        'phonetic_errors': []
+    }
+    
+    # Simple sequence alignment for error detection
+    i, j = 0, 0
+    max_i, max_j = len(original_words), len(transcribed_words)
+    
+    while i < max_i and j < max_j:
+        orig_word = original_words[i]
+        trans_word = transcribed_words[j]
+        
+        # Exact match
+        if orig_word == trans_word:
+            i += 1
+            j += 1
+            continue
+        
+        # Substitution (different word in same position)
+        if j < max_j and i < max_i:
+            errors['substitutions'].append({
+                'original': orig_word,
+                'spoken': trans_word,
+                'position': i
+            })
+            i += 1
+            j += 1
+            continue
+        
+        # Omission (missing word)
+        if j >= max_j and i < max_i:
+            errors['omissions'].append({
+                'word': orig_word,
+                'position': i
+            })
+            i += 1
+            continue
+        
+        # Addition (extra word)
+        if i >= max_i and j < max_j:
+            errors['additions'].append({
+                'word': trans_word,
+                'position': j
+            })
+            j += 1
+            continue
+    
+    # Detect potential inversions (check adjacent word swaps)
+    for pos in range(min(len(original_words), len(transcribed_words)) - 1):
+        if (pos + 1 < len(transcribed_words) and 
+            original_words[pos] == transcribed_words[pos + 1] and
+            original_words[pos + 1] == transcribed_words[pos]):
+            errors['inversions'].append({
+                'word1': original_words[pos],
+                'word2': original_words[pos + 1],
+                'position': pos
+            })
+    
+    # Calculate accuracy metrics
+    total_original_words = len(original_words)
+    correct_words = total_original_words - len(errors['omissions']) - len(errors['substitutions'])
+    word_accuracy = (correct_words / total_original_words * 100) if total_original_words > 0 else 0
+    
+    return {
+        'word_accuracy': round(word_accuracy, 2),
+        'total_errors': len(errors['omissions']) + len(errors['additions']) + 
+                        len(errors['substitutions']) + len(errors['inversions']),
+        'error_breakdown': errors,
+        'original_word_count': total_original_words,
+        'transcribed_word_count': len(transcribed_words)
+    }
 
 def extract_difficulty_words(text):
     """Extract potentially difficult words from text"""
@@ -243,6 +455,7 @@ def determine_dyslexia_likelihood(analysis):
     else:
         return 'very_high'
 
+# Update the main transcribe function
 @app.route('/transcribe', methods=['POST'])
 def transcribe_audio():
     """Transcribe audio and analyze reading performance"""
@@ -279,24 +492,44 @@ def transcribe_audio():
             # Use converted file if successful, otherwise try original
             audio_file_path = output_path if conversion_success else input_path
             
-            # Transcribe audio using Whisper
-            logger.info("Transcribing audio...")
-            result = model.transcribe(audio_file_path)
-            transcription = result["text"].strip()
+            # Transcribe audio using Whisper with timestamps
+            logger.info("Transcribing audio with timestamps...")
+            transcription, words_with_timestamps, audio_duration = transcribe_with_timestamps(audio_file_path)
             
-            # Get audio duration from Whisper result
-            audio_duration = result.get('duration', 30)
+            # Analyze pauses and hesitations
+            pauses, hesitations = detect_pauses_and_hesitations(words_with_timestamps)
             
-            # Analyze reading performance
-            analysis = analyze_reading_performance(transcription, original_text, audio_duration)
+            # Analyze reading fluency
+            fluency_analysis = analyze_reading_fluency(words_with_timestamps, audio_duration)
             
-            logger.info(f"Transcription successful: {len(transcription)} characters")
+            # Advanced text comparison
+            text_comparison = advanced_text_comparison(transcription, original_text, words_with_timestamps)
+            
+            # Enhanced reading performance analysis
+            analysis = analyze_reading_performance(
+                transcription, 
+                original_text, 
+                audio_duration,
+                pauses=pauses,
+                hesitations=hesitations,
+                fluency_metrics=fluency_analysis,
+                text_comparison=text_comparison
+            )
+            
+            logger.info(f"Enhanced transcription successful: {len(transcription)} characters")
             
             return jsonify({
                 "success": True,
                 "transcription": transcription,
                 "analysis": analysis,
-                "audio_duration": audio_duration
+                "audio_duration": audio_duration,
+                "detailed_analysis": {
+                    "pauses": pauses,
+                    "hesitations": hesitations,
+                    "fluency_metrics": fluency_analysis,
+                    "text_comparison": text_comparison,
+                    "words_with_timestamps": words_with_timestamps
+                }
             })
             
         finally:
