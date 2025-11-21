@@ -284,7 +284,7 @@ def analyze_reading_fluency(words_with_timestamps, audio_duration):
     }
 
 def advanced_text_comparison(transcription, original_text, words_with_timestamps):
-    """Compare transcription to original text with detailed analysis"""
+    """Compare transcription to original text with detailed analysis using proper sequence alignment"""
     
     # Normalize texts for comparison
     original_lower = original_text.lower()
@@ -304,48 +304,48 @@ def advanced_text_comparison(transcription, original_text, words_with_timestamps
         'phonetic_errors': []
     }
     
-    # Simple sequence alignment for error detection
-    i, j = 0, 0
-    max_i, max_j = len(original_words), len(transcribed_words)
+    # Use sequence alignment to find the optimal matching
+    alignment = sequence_alignment(original_words, transcribed_words)
     
-    while i < max_i and j < max_j:
-        orig_word = original_words[i]
-        trans_word = transcribed_words[j]
-        
-        # Exact match
-        if orig_word == trans_word:
+    # Analyze the alignment to find errors
+    i, j = 0, 0
+    for operation, orig_word, trans_word in alignment:
+        if operation == 'match':
+            # Words match, check if they're in correct position
+            if i != j and abs(i - j) > 2:  # Significant position difference
+                errors['line_jumps'] += 1
             i += 1
             j += 1
-            continue
-        
-        # Substitution (different word in same position)
-        if j < max_j and i < max_i:
+            
+        elif operation == 'substitution':
             errors['substitutions'].append({
                 'original': orig_word,
                 'spoken': trans_word,
                 'position': i
             })
+            # Check if this could be a phonetic error
+            if is_phonetic_error(orig_word, trans_word):
+                errors['phonetic_errors'].append({
+                    'original': orig_word,
+                    'spoken': trans_word,
+                    'position': i
+                })
             i += 1
             j += 1
-            continue
-        
-        # Omission (missing word)
-        if j >= max_j and i < max_i:
-            errors['omissions'].append({
-                'word': orig_word,
-                'position': i
-            })
-            i += 1
-            continue
-        
-        # Addition (extra word)
-        if i >= max_i and j < max_j:
+            
+        elif operation == 'insertion':
             errors['additions'].append({
                 'word': trans_word,
                 'position': j
             })
             j += 1
-            continue
+            
+        elif operation == 'deletion':
+            errors['omissions'].append({
+                'word': orig_word,
+                'position': i
+            })
+            i += 1
     
     # Detect potential inversions (check adjacent word swaps)
     for pos in range(min(len(original_words), len(transcribed_words)) - 1):
@@ -369,8 +369,114 @@ def advanced_text_comparison(transcription, original_text, words_with_timestamps
                         len(errors['substitutions']) + len(errors['inversions']),
         'error_breakdown': errors,
         'original_word_count': total_original_words,
-        'transcribed_word_count': len(transcribed_words)
+        'transcribed_word_count': len(transcribed_words),
+        'alignment_details': alignment  # For debugging
     }
+
+def sequence_alignment(original, transcribed):
+    """Perform optimal sequence alignment using dynamic programming"""
+    m, n = len(original), len(transcribed)
+    
+    # Initialize DP table
+    dp = [[0] * (n + 1) for _ in range(m + 1)]
+    
+    # Initialize first row and column
+    for i in range(m + 1):
+        dp[i][0] = i  # Cost of deleting all original words
+    for j in range(n + 1):
+        dp[0][j] = j  # Cost of inserting all transcribed words
+    
+    # Fill DP table
+    for i in range(1, m + 1):
+        for j in range(1, n + 1):
+            if original[i-1] == transcribed[j-1]:
+                cost = 0  # Match
+            else:
+                cost = 1  # Substitution
+            
+            dp[i][j] = min(
+                dp[i-1][j] + 1,      # Deletion
+                dp[i][j-1] + 1,      # Insertion  
+                dp[i-1][j-1] + cost  # Substitution/Match
+            )
+    
+    # Backtrack to find optimal alignment
+    alignment = []
+    i, j = m, n
+    
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and original[i-1] == transcribed[j-1]:
+            alignment.append(('match', original[i-1], transcribed[j-1]))
+            i -= 1
+            j -= 1
+        elif i > 0 and j > 0 and dp[i][j] == dp[i-1][j-1] + 1:
+            alignment.append(('substitution', original[i-1], transcribed[j-1]))
+            i -= 1
+            j -= 1
+        elif j > 0 and dp[i][j] == dp[i][j-1] + 1:
+            alignment.append(('insertion', None, transcribed[j-1]))
+            j -= 1
+        else:  # i > 0 and dp[i][j] == dp[i-1][j] + 1
+            alignment.append(('deletion', original[i-1], None))
+            i -= 1
+    
+    return list(reversed(alignment))
+
+def is_phonetic_error(word1, word2):
+    """Check if two words are phonetically similar but spelled differently"""
+    # Common phonetic substitutions
+    phonetic_patterns = [
+        (r'ough', 'uf'), (r'ough', 'off'), (r'ough', 'ow'),
+        (r'ph', 'f'), (r'gh', 'f'), (r'ck', 'k'),
+        (r'ci', 'si'), (r'ce', 'se'), (r'cy', 'sy'),
+        (r'ed$', 't'),  # walked -> walkt
+        (r'^ex', 'egz'), (r'^ex', 'eks'),
+    ]
+    
+    # Simple soundex comparison
+    if soundex(word1) == soundex(word2) and word1 != word2:
+        return True
+    
+    # Check common phonetic patterns
+    for pattern, replacement in phonetic_patterns:
+        import re
+        if re.sub(pattern, replacement, word1) == word2:
+            return True
+        if re.sub(pattern, replacement, word2) == word1:
+            return True
+    
+    return False
+
+def soundex(word):
+    """Simple soundex implementation for phonetic matching"""
+    if not word:
+        return ""
+    
+    # Soundex coding rules
+    codes = {
+        'b': '1', 'f': '1', 'p': '1', 'v': '1',
+        'c': '2', 'g': '2', 'j': '2', 'k': '2', 'q': '2', 's': '2', 'x': '2', 'z': '2',
+        'd': '3', 't': '3',
+        'l': '4',
+        'm': '5', 'n': '5',
+        'r': '6'
+    }
+    
+    # Keep first letter
+    first_letter = word[0].upper()
+    soundex_code = first_letter
+    
+    # Encode remaining letters
+    for char in word[1:].lower():
+        if char in codes:
+            code = codes[char]
+            # Don't add code if it's the same as the last one
+            if code != soundex_code[-1]:
+                soundex_code += code
+    
+    # Pad with zeros and return first 4 characters
+    soundex_code = soundex_code.ljust(4, '0')[:4]
+    return soundex_code
 
 def extract_difficulty_words(text):
     """Extract potentially difficult words from text"""
