@@ -43,10 +43,10 @@ def load_model_once():
     if model is not None:
         return
     
-    logger.info("Loading Whisper medium model...")
+    logger.info("Loading Whisper base model...")
     try:
-        # Using medium model for faster inference
-        model = whisper.load_model("medium")
+        # Using base model for faster inference
+        model = whisper.load_model("base")
         logger.info("Whisper model loaded successfully!")
     except Exception as e:
         logger.error(f"Failed to load Whisper model: {str(e)}")
